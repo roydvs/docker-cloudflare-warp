@@ -1,0 +1,44 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE and Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.iml
+
+# Docker
+docker-compose.override.yml
+docker-compose.override.yaml
+.dockerignore.local
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Dependencies
+node_modules/
+vendor/
+.cache/
+
+# Build outputs
+dist/
+build/
+out/
+
+# OS specific
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Temporary files
+tmp/
+temp/
