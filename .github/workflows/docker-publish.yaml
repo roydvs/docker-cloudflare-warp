@@ -3,11 +3,13 @@ name: Build and Push Image to Multiple Registries
 on:
   push:
     branches:
-      - "main"
-      - "dev"
-    tags: ["v*.*.*"]
+      - main
+      - dev
+    tags:
+      - v*.*.*
   pull_request:
-    branches: ["main"]
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
@@ -57,13 +59,14 @@ jobs:
             ghcr.io/${{ github.repository }}
             ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/{1}', secrets.DOCKERHUB_USERNAME, github.event.repository.name) || '' }}
           tags: |
-            type=sha,format=long
+            type=sha
             type=schedule
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6

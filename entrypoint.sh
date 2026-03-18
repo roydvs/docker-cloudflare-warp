@@ -14,17 +14,18 @@ RETRY_SLEEP_CONNECT=3
 CURL_TIMEOUT=2
 
 WARP_PID=""
-SOCAT_PID=""
+PROXY_PID=""
 WARP_PORT=56789
 CONF_DIR="/var/lib/cloudflare-warp"
 MDM_FILE="${CONF_DIR}/mdm.xml"
 WARP_LOG_FILE="/var/log/warp.log"
+PROXY_LOG_FILE="/var/log/proxy.log"
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-warp_cli() { 
+warp_cli() {
     warp-cli --accept-tos "$@"
 }
 
@@ -43,16 +44,21 @@ validate_inputs() {
         echo "Error: Invalid MODE '$MODE'. Must be 'proxy' or 'warp'."
         exit 1
     fi
-    
+
     if [[ ! "$PROTOCOL" =~ ^(masque|wireguard)$ ]]; then
         echo "Error: Invalid PROTOCOL '$PROTOCOL'. Must be 'masque' or 'wireguard'."
+        exit 1
+    fi
+
+    if ! [[ "$PROXY_PORT" =~ ^[0-9]+$ ]] ; then
+        echo "Error: PROXY_PORT must be numeric."
         exit 1
     fi
 }
 
 cleanup() {
     echo "Cleaning up..."
-    [ -n "$SOCAT_PID" ] && kill $SOCAT_PID 2>/dev/null || true
+    [ -n "$PROXY_PID" ] && kill $PROXY_PID 2>/dev/null || true
     [ -n "$WARP_PID" ] && kill $WARP_PID 2>/dev/null || true
 }
 
@@ -63,7 +69,7 @@ print_diag_info() {
     echo "--- Process status ---"
     echo ""
     ps aux || true
-    
+
     echo ""
     echo "--- File List in /run/cloudflare-warp, /run/dbus ---"
     echo ""
@@ -75,11 +81,18 @@ print_diag_info() {
     echo ""
     warp-cli --accept-tos status 2>&1 || true
 
-    if [ -f /var/log/warp.log ]; then
+    if [ -f "${WARP_LOG_FILE}" ]; then
         echo ""
         echo "--- warp.log ---"
         echo ""
-        tail -20 /var/log/warp.log || true
+        tail -20 "${WARP_LOG_FILE}" || true
+    fi
+
+    if [ -f "${PROXY_LOG_FILE}" ]; then
+        echo ""
+        echo "--- proxy.log ---"
+        echo ""
+        tail -20 "${PROXY_LOG_FILE}" || true
     fi
 }
 
@@ -92,7 +105,7 @@ run_dbus() {
             exit 1
         }
     fi
-    rm -f /var/run/dbus/pid
+    rm -f /var/run/dbus/pid || true
     dbus-daemon --config-file=/usr/share/dbus-1/system.conf --print-address --fork || {
         echo "Error: Failed to start dbus-daemon."
         exit 1
@@ -101,7 +114,7 @@ run_dbus() {
 
 start_warp() {
     echo "Starting warp-svc..."
-    warp-svc > $WARP_LOG_FILE 2>&1 &
+    warp-svc > "${WARP_LOG_FILE}" 2>&1 &
     WARP_PID=$!
     sleep 2
 
@@ -152,7 +165,7 @@ connect_warp() {
 
     while true; do
         RESPONSE=$(curl "${CURL_OPTS[@]}" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-        
+
         if echo "$RESPONSE" | grep -q "warp=on"; then
             echo "Connection verified - WARP is active."
             return 0
@@ -161,7 +174,7 @@ connect_warp() {
         if [ $((COUNT % 3)) -eq 0 ]; then
             echo "Attempt $COUNT/$MAX_RETRIES_CONNECT: Still waiting for warp to become ready..."
         fi
-        
+
         sleep $RETRY_SLEEP_CONNECT
         COUNT=$((COUNT+1))
         if [ ${COUNT} -ge ${MAX_RETRIES_CONNECT} ]; then
@@ -224,6 +237,7 @@ auth_warp(){
         }
     else
         echo "Creating new free registration..."
+        warp_cli registration delete || true
         warp_cli registration new || {
             echo "Error: Failed to create free registration."
             exit 1
@@ -260,22 +274,26 @@ elif [ -d "$CONF_DIR" ] && [ -n "$(ls -A "${CONF_DIR}")" ]; then
     echo "Using existing configuration..."
     start_warp
 else
+    echo "Cleaning up old WARP state..."
+    rm -rf /run/cloudflare-warp/*
+    rm -rf "${CONF_DIR}/*"
+
     echo "Initializing standard WARP configuration..."
     auth_warp
 fi
 
 echo "Add IP ranges to split tunnel configuration..."
-warp_cli tunnel ip add-range 10.0.0.0/8 || exit 1
-warp_cli tunnel ip add-range 172.16.0.0/12 || exit 1
-warp_cli tunnel ip add-range 192.168.0.0/16 || exit 1
+warp_cli tunnel ip add-range 10.0.0.0/8 || true
+warp_cli tunnel ip add-range 172.16.0.0/12 || true
+warp_cli tunnel ip add-range 192.168.0.0/16 || true
 
 connect_warp
 
 if [ "${MODE}" = "proxy" ]; then
     echo "Starting proxy forwarder on 0.0.0.0:${PROXY_PORT} -> 127.0.0.1:${WARP_PORT}"
-    socat TCP-LISTEN:"${PROXY_PORT}",fork TCP:127.0.0.1:"${WARP_PORT}" &
-    SOCAT_PID=$!
-    echo "Proxy forwarder started with PID $SOCAT_PID"
+    socat TCP-LISTEN:"${PROXY_PORT}",fork TCP:127.0.0.1:"${WARP_PORT}" > "${PROXY_LOG_FILE}" 2>&1  &
+    PROXY_PID=$!
+    echo "Proxy forwarder started with PID $PROXY_PID"
 fi
 
 echo "Setup complete. Waiting for services..."
