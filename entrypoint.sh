@@ -15,6 +15,7 @@ CURL_TIMEOUT=2
 
 WARP_PID=""
 PROXY_PID=""
+DBUS_PID=""
 WARP_PORT=56789
 CONF_DIR="/var/lib/cloudflare-warp"
 MDM_FILE="${CONF_DIR}/mdm.xml"
@@ -57,9 +58,15 @@ validate_inputs() {
 }
 
 cleanup() {
-    echo "Cleaning up..."
-    [ -n "$PROXY_PID" ] && kill $PROXY_PID 2>/dev/null || true
-    [ -n "$WARP_PID" ] && kill $WARP_PID 2>/dev/null || true
+    echo "Caught exit signal, cleaning up..."
+    echo "Disconnecting WARP..."
+    warp_cli disconnect 2>/dev/null || true
+
+    [ -n "$PROXY_PID" ] && kill -TERM $PROXY_PID 2>/dev/null || true
+    [ -n "$WARP_PID" ] && kill -TERM $WARP_PID 2>/dev/null || true
+    [ -n "$DBUS_PID" ] && kill -TERM $DBUS_PID 2>/dev/null || true
+    [ -n "$WARP_PID" ] && wait $WARP_PID 2>/dev/null || true
+    echo "Cleanup complete."
 }
 
 trap cleanup EXIT INT TERM
@@ -67,7 +74,6 @@ trap cleanup EXIT INT TERM
 print_diag_info() {
     echo ""
     echo "--- Process status ---"
-    echo ""
     ps aux || true
 
     echo ""
@@ -79,7 +85,7 @@ print_diag_info() {
     echo ""
     echo "--- warp-svc Status ---"
     echo ""
-    warp-cli --accept-tos status 2>&1 || true
+    warp_cli status 2>&1 || true
 
     if [ -f "${WARP_LOG_FILE}" ]; then
         echo ""
@@ -98,7 +104,7 @@ print_diag_info() {
 
 run_dbus() {
     echo "Starting dbus..."
-    mkdir -p /run/dbus
+    mkdir -p /run/dbus /var/run/dbus
     if [ ! -f /var/lib/dbus/machine-id ]; then
         dbus-uuidgen > /var/lib/dbus/machine-id || {
             echo "Error: Failed to generate dbus machine-id."
@@ -106,10 +112,9 @@ run_dbus() {
         }
     fi
     rm -f /var/run/dbus/pid || true
-    dbus-daemon --config-file=/usr/share/dbus-1/system.conf --print-address --fork || {
-        echo "Error: Failed to start dbus-daemon."
-        exit 1
-    }
+    dbus-daemon --config-file=/usr/share/dbus-1/system.conf --print-address &
+    DBUS_PID=$!
+    sleep 1
 }
 
 start_warp() {
@@ -121,16 +126,22 @@ start_warp() {
     echo "Waiting for warp-svc to become ready..."
     local COUNT=0
     while ! warp_cli status > /dev/null 2>&1; do
+        if ! kill -0 $WARP_PID 2>/dev/null; then
+            echo "Error: warp-svc process died during startup."
+            print_diag_info
+            exit 1
+        fi
+
         sleep $RETRY_SLEEP_WARP
         COUNT=$((COUNT+1))
 
         if [ $((COUNT % 3)) -eq 0 ]; then
-            echo "Attempt $COUNT/$MAX_RETRIES_WARP: Still waiting for warp-svc to become ready..."
+            echo "Attempt $COUNT/$MAX_RETRIES_WARP: Still waiting for warp-svc..."
             if [ $((COUNT % 9)) -eq 0 ]; then
                 echo ""
                 echo "--- warp-svc Status ---"
                 echo ""
-                warp-cli --accept-tos status 2>&1 || true
+                warp_cli status 2>&1 || true
             fi
         fi
 
@@ -171,12 +182,13 @@ connect_warp() {
             return 0
         fi
 
-        if [ $((COUNT % 3)) -eq 0 ]; then
-            echo "Attempt $COUNT/$MAX_RETRIES_CONNECT: Still waiting for warp to become ready..."
-        fi
-
         sleep $RETRY_SLEEP_CONNECT
         COUNT=$((COUNT+1))
+
+        if [ $((COUNT % 3)) -eq 0 ]; then
+            echo "Attempt $COUNT/$MAX_RETRIES_CONNECT: Still waiting for warp..."
+        fi
+
         if [ ${COUNT} -ge ${MAX_RETRIES_CONNECT} ]; then
             echo "Error: warp failed to connect within $((MAX_RETRIES_CONNECT * RETRY_SLEEP_CONNECT)) seconds."
             print_diag_info
@@ -188,12 +200,9 @@ connect_warp() {
 
 auth_zero_trust(){
     echo "Generating Zero Trust MDM configuration..."
-    mkdir -p "${CONF_DIR}" || {
-        echo "Error: Failed to create config directory."
-        exit 1
-    }
+    mkdir -p "${CONF_DIR}" || exit 1
 
-    if [ -z "${WARP_ORG}" ] || [ -z "${WARP_CLIENT_ID}" ] || [ -z "${WARP_CLIENT_SECRET}" ]; then
+    if [ -z "${WARP_ORG}" ] ||[ -z "${WARP_CLIENT_ID}" ] || [ -z "${WARP_CLIENT_SECRET}" ]; then
         echo "Error: Missing required Zero Trust environment variables."
         exit 1
     fi
@@ -231,10 +240,7 @@ auth_warp(){
     echo "Registering new warp client..."
     if [ -n "${WARP_LICENSE}" ]; then
         echo "Using provided license key..."
-        warp_cli registration license "$WARP_LICENSE" || {
-            echo "Error: Failed to register with license key."
-            exit 1
-        }
+        warp_cli registration license "$WARP_LICENSE" || exit 1
     else
         echo "Creating new free registration..."
         warp_cli registration delete || true
@@ -260,10 +266,9 @@ auth_warp(){
     warp_cli tunnel protocol set "${proto}" || exit 1
 }
 
-# Main execution
+# --- Main execution ---
 check_required_commands
 validate_inputs
-
 run_dbus
 
 # Check for existing configuration
@@ -276,13 +281,13 @@ elif [ -d "$CONF_DIR" ] && [ -n "$(ls -A "${CONF_DIR}")" ]; then
 else
     echo "Cleaning up old WARP state..."
     rm -rf /run/cloudflare-warp/*
-    rm -rf "${CONF_DIR}/*"
+    rm -rf "${CONF_DIR}"/*
 
     echo "Initializing standard WARP configuration..."
     auth_warp
 fi
 
-echo "Add IP ranges to split tunnel configuration..."
+echo "Adding IP ranges to split tunnel configuration..."
 warp_cli tunnel ip add-range 10.0.0.0/8 || true
 warp_cli tunnel ip add-range 172.16.0.0/12 || true
 warp_cli tunnel ip add-range 192.168.0.0/16 || true
@@ -291,10 +296,15 @@ connect_warp
 
 if [ "${MODE}" = "proxy" ]; then
     echo "Starting proxy forwarder on 0.0.0.0:${PROXY_PORT} -> 127.0.0.1:${WARP_PORT}"
-    socat TCP-LISTEN:"${PROXY_PORT}",fork TCP:127.0.0.1:"${WARP_PORT}" > "${PROXY_LOG_FILE}" 2>&1  &
+    socat TCP-LISTEN:"${PROXY_PORT}",fork TCP:127.0.0.1:"${WARP_PORT}" > "${PROXY_LOG_FILE}" 2>&1 &
     PROXY_PID=$!
     echo "Proxy forwarder started with PID $PROXY_PID"
 fi
 
-echo "Setup complete. Waiting for services..."
-wait ${WARP_PID}
+echo "Setup complete. Container is now running."
+
+if [ -n "$PROXY_PID" ]; then
+    wait -n $WARP_PID $PROXY_PID
+else
+    wait $WARP_PID
+fi
