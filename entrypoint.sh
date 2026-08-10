@@ -31,7 +31,7 @@ warp_cli() {
 }
 
 check_required_commands() {
-    local required_cmds=("warp-cli" "warp-svc" "dbus-daemon" "socat" "curl" "dbus-uuidgen")
+    local required_cmds=("warp-cli" "warp-svc" "dbus-daemon" "socat" "curl")
     for cmd in "${required_cmds[@]}"; do
         if ! command_exists "$cmd"; then
             echo "Error: Required command '$cmd' not found."
@@ -58,14 +58,17 @@ validate_inputs() {
 }
 
 cleanup() {
+    trap - EXIT INT TERM
+
     echo "Caught exit signal, cleaning up..."
     echo "Disconnecting WARP..."
     warp_cli disconnect 2>/dev/null || true
 
-    [ -n "$PROXY_PID" ] && kill -TERM $PROXY_PID 2>/dev/null || true
-    [ -n "$WARP_PID" ] && kill -TERM $WARP_PID 2>/dev/null || true
-    [ -n "$DBUS_PID" ] && kill -TERM $DBUS_PID 2>/dev/null || true
-    [ -n "$WARP_PID" ] && wait $WARP_PID 2>/dev/null || true
+    [ -n "$PROXY_PID" ] && kill -TERM "$PROXY_PID" 2>/dev/null || true
+    [ -n "$WARP_PID" ] && kill -TERM "$WARP_PID" 2>/dev/null || true
+    [ -n "$WARP_PID" ] && wait "$WARP_PID" 2>/dev/null || true
+
+    [ -n "$DBUS_PID" ] && kill -TERM "$DBUS_PID" 2>/dev/null || true
     echo "Cleanup complete."
 }
 
@@ -105,23 +108,15 @@ print_diag_info() {
 run_dbus() {
     echo "Starting dbus..."
     mkdir -p /run/dbus /var/run/dbus
-    if [ ! -f /var/lib/dbus/machine-id ]; then
-        dbus-uuidgen > /var/lib/dbus/machine-id || {
-            echo "Error: Failed to generate dbus machine-id."
-            exit 1
-        }
-    fi
-    rm -f /var/run/dbus/pid || true
-    dbus-daemon --config-file=/usr/share/dbus-1/system.conf --print-address &
+    rm -f /var/run/dbus/pid /run/dbus/system_bus_socket /var/run/dbus/system_bus_socket || true
+    dbus-daemon --system --nofork &
     DBUS_PID=$!
-    sleep 1
 }
 
 start_warp() {
     echo "Starting warp-svc..."
     warp-svc > "${WARP_LOG_FILE}" 2>&1 &
     WARP_PID=$!
-    sleep 2
 
     echo "Waiting for warp-svc to become ready..."
     local COUNT=0
@@ -173,7 +168,6 @@ connect_warp() {
 
     local COUNT=0
     local RESPONSE=""
-
     while true; do
         RESPONSE=$(curl "${CURL_OPTS[@]}" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
 
